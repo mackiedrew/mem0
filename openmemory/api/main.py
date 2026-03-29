@@ -1,4 +1,5 @@
 import datetime
+import json
 import os
 from uuid import uuid4
 
@@ -7,15 +8,55 @@ from app.database import Base, SessionLocal, engine
 from app.mcp_server import setup_mcp_server
 from app.models import App, User
 from app.routers import apps_router, backup_router, config_router, memories_router, stats_router
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from fastapi_pagination import add_pagination
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 OPENMEMORY_API_KEY = os.getenv("OPENMEMORY_API_KEY")
 
+OPEN_PATHS = {"/", "/docs", "/openapi.json", "/health", "/redoc"}
+
+
+class APIKeyAuthMiddleware:
+    """Raw ASGI middleware for API key auth. Unlike BaseHTTPMiddleware,
+    this doesn't interfere with SSE/streaming responses."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not OPENMEMORY_API_KEY:
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path in OPEN_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        api_key = headers.get(b"x-api-key", b"").decode()
+
+        if api_key != OPENMEMORY_API_KEY:
+            body = json.dumps({"detail": "Invalid or missing API key"}).encode()
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    [b"content-type", b"application/json"],
+                    [b"content-length", str(len(body)).encode()],
+                ],
+            })
+            await send({"type": "http.response.body", "body": body})
+            return
+
+        await self.app(scope, receive, send)
+
+
 app = FastAPI(title="OpenMemory API")
 
+app.add_middleware(APIKeyAuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,16 +64,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-OPEN_PATHS = {"/", "/docs", "/openapi.json", "/health", "/redoc"}
-
-@app.middleware("http")
-async def auth_middleware(request: Request, call_next):
-    if OPENMEMORY_API_KEY and request.url.path not in OPEN_PATHS:
-        api_key = request.headers.get("x-api-key")
-        if api_key != OPENMEMORY_API_KEY:
-            return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
-    return await call_next(request)
 
 # Create all tables
 Base.metadata.create_all(bind=engine)
