@@ -22,7 +22,7 @@ from fastapi_pagination import Page, Params
 from fastapi_pagination.ext.sqlalchemy import paginate as sqlalchemy_paginate
 from pydantic import BaseModel
 from sqlalchemy import func
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, subqueryload
 
 router = APIRouter(prefix="/api/v1/memories", tags=["memories"])
 
@@ -143,14 +143,10 @@ async def list_memories(
         to_datetime = datetime.fromtimestamp(to_date, tz=UTC)
         query = query.filter(Memory.created_at <= to_datetime)
 
-    # Add joins for app and categories after filtering
-    query = query.outerjoin(App, Memory.app_id == App.id)
-    query = query.outerjoin(Memory.categories)
-
     # Apply category filter if provided
     if categories:
         category_list = [c.strip() for c in categories.split(",")]
-        query = query.filter(Category.name.in_(category_list))
+        query = query.join(Memory.categories).filter(Category.name.in_(category_list))
 
     # Apply sorting if specified
     if sort_column:
@@ -158,10 +154,10 @@ async def list_memories(
         if sort_field:
             query = query.order_by(sort_field.desc()) if sort_direction == "desc" else query.order_by(sort_field.asc())
 
-    # Add eager loading for app and categories
+    # Use subqueryload to avoid DISTINCT issues with PostgreSQL
     query = query.options(
-        joinedload(Memory.app),
-        joinedload(Memory.categories)
+        subqueryload(Memory.app),
+        subqueryload(Memory.categories)
     )
 
     # Get paginated results with transformer
@@ -569,14 +565,9 @@ async def filter_memories(
     if request.app_ids:
         query = query.filter(Memory.app_id.in_(request.app_ids))
 
-    # Add joins for app and categories
-    query = query.outerjoin(App, Memory.app_id == App.id)
-
     # Apply category filter
     if request.category_ids:
         query = query.join(Memory.categories).filter(Category.id.in_(request.category_ids))
-    else:
-        query = query.outerjoin(Memory.categories)
 
     # Apply date filters
     if request.from_date:
@@ -603,6 +594,9 @@ async def filter_memories(
         if request.sort_column not in sort_mapping:
             raise HTTPException(status_code=400, detail="Invalid sort column")
 
+        if request.sort_column == 'app_name':
+            query = query.outerjoin(App, Memory.app_id == App.id)
+
         sort_field = sort_mapping[request.sort_column]
         if sort_direction == 'desc':
             query = query.order_by(sort_field.desc())
@@ -612,31 +606,11 @@ async def filter_memories(
         # Default sorting
         query = query.order_by(Memory.created_at.desc())
 
-    # Add eager loading for categories
+    # Use subqueryload to avoid DISTINCT issues with PostgreSQL
     query = query.options(
-        joinedload(Memory.categories)
+        subqueryload(Memory.categories),
+        subqueryload(Memory.app)
     )
-
-    # Use subquery to handle distinct + ordering (PostgreSQL requires DISTINCT ON to match ORDER BY)
-    from sqlalchemy import distinct
-    memory_ids_subquery = query.with_entities(Memory.id).distinct().subquery()
-    query = db.query(Memory).filter(Memory.id.in_(
-        db.query(memory_ids_subquery)
-    )).options(
-        joinedload(Memory.categories),
-        joinedload(Memory.app)
-    )
-
-    # Re-apply sorting on the outer query
-    if request.sort_column and request.sort_direction:
-        sort_field = sort_mapping.get(request.sort_column)
-        if sort_field:
-            if request.sort_direction.lower() == 'desc':
-                query = query.order_by(sort_field.desc())
-            else:
-                query = query.order_by(sort_field.asc())
-    else:
-        query = query.order_by(Memory.created_at.desc())
 
     # Use fastapi-pagination's paginate function
     return sqlalchemy_paginate(
