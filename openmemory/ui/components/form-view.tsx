@@ -13,6 +13,7 @@ import { Textarea } from "./ui/textarea"
 import { useRef, useState as useReactState } from "react"
 import { useSelector } from "react-redux"
 import { RootState } from "@/store/store"
+import { getApiUrl, getApiHeaders } from "@/lib/api"
 
 interface FormViewProps {
   settings: any
@@ -26,7 +27,7 @@ export function FormView({ settings, onChange }: FormViewProps) {
   const [isUploading, setIsUploading] = useReactState(false)
   const [selectedImportFileName, setSelectedImportFileName] = useReactState("")
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8765"
+  const API_URL = getApiUrl()
   const userId = useSelector((state: RootState) => state.profile.userId)
 
   const handleOpenMemoryChange = (key: string, value: any) => {
@@ -371,7 +372,7 @@ export function FormView({ settings, onChange }: FormViewProps) {
                   try {
                     const res = await fetch(`${API_URL}/api/v1/backup/export`, {
                       method: "POST",
-                      headers: { "Content-Type": "application/json", Accept: "application/zip" },
+                      headers: { "Content-Type": "application/json", Accept: "application/zip", ...getApiHeaders() },
                       body: JSON.stringify({ user_id: userId }),
                     })
                     if (!res.ok) throw new Error(`Export failed with status ${res.status}`)
@@ -436,7 +437,7 @@ export function FormView({ settings, onChange }: FormViewProps) {
                       const form = new FormData()
                       form.append("file", file)
                       form.append("user_id", String(userId))
-                      const res = await fetch(`${API_URL}/api/v1/backup/import`, { method: "POST", body: form })
+                      const res = await fetch(`${API_URL}/api/v1/backup/import`, { method: "POST", body: form, headers: getApiHeaders() })
                       if (!res.ok) throw new Error(`Import failed with status ${res.status}`)
                       await res.json()
                       if (fileInputRef.current) fileInputRef.current.value = ""

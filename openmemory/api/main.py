@@ -1,4 +1,5 @@
 import datetime
+import os
 from uuid import uuid4
 
 from app.config import DEFAULT_APP_ID, USER_ID
@@ -6,9 +7,12 @@ from app.database import Base, SessionLocal, engine
 from app.mcp_server import setup_mcp_server
 from app.models import App, User
 from app.routers import apps_router, backup_router, config_router, memories_router, stats_router
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi_pagination import add_pagination
+
+OPENMEMORY_API_KEY = os.getenv("OPENMEMORY_API_KEY")
 
 app = FastAPI(title="OpenMemory API")
 
@@ -19,6 +23,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+OPEN_PATHS = {"/", "/docs", "/openapi.json", "/health", "/redoc"}
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if OPENMEMORY_API_KEY and request.url.path not in OPEN_PATHS:
+        api_key = request.headers.get("x-api-key")
+        if api_key != OPENMEMORY_API_KEY:
+            return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+    return await call_next(request)
 
 # Create all tables
 Base.metadata.create_all(bind=engine)
