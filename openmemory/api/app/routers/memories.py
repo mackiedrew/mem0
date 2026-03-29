@@ -162,7 +162,7 @@ async def list_memories(
     query = query.options(
         joinedload(Memory.app),
         joinedload(Memory.categories)
-    ).distinct(Memory.id)
+    )
 
     # Get paginated results with transformer
     return sqlalchemy_paginate(
@@ -587,17 +587,18 @@ async def filter_memories(
         to_datetime = datetime.fromtimestamp(request.to_date, tz=UTC)
         query = query.filter(Memory.created_at <= to_datetime)
 
+    # Sort mapping for column name -> SQLAlchemy field
+    sort_mapping = {
+        'memory': Memory.content,
+        'app_name': App.name,
+        'created_at': Memory.created_at
+    }
+
     # Apply sorting
     if request.sort_column and request.sort_direction:
         sort_direction = request.sort_direction.lower()
         if sort_direction not in ['asc', 'desc']:
             raise HTTPException(status_code=400, detail="Invalid sort direction")
-
-        sort_mapping = {
-            'memory': Memory.content,
-            'app_name': App.name,
-            'created_at': Memory.created_at
-        }
 
         if request.sort_column not in sort_mapping:
             raise HTTPException(status_code=400, detail="Invalid sort column")
@@ -611,10 +612,31 @@ async def filter_memories(
         # Default sorting
         query = query.order_by(Memory.created_at.desc())
 
-    # Add eager loading for categories and make the query distinct
+    # Add eager loading for categories
     query = query.options(
         joinedload(Memory.categories)
-    ).distinct(Memory.id)
+    )
+
+    # Use subquery to handle distinct + ordering (PostgreSQL requires DISTINCT ON to match ORDER BY)
+    from sqlalchemy import distinct
+    memory_ids_subquery = query.with_entities(Memory.id).distinct().subquery()
+    query = db.query(Memory).filter(Memory.id.in_(
+        db.query(memory_ids_subquery)
+    )).options(
+        joinedload(Memory.categories),
+        joinedload(Memory.app)
+    )
+
+    # Re-apply sorting on the outer query
+    if request.sort_column and request.sort_direction:
+        sort_field = sort_mapping.get(request.sort_column)
+        if sort_field:
+            if request.sort_direction.lower() == 'desc':
+                query = query.order_by(sort_field.desc())
+            else:
+                query = query.order_by(sort_field.asc())
+    else:
+        query = query.order_by(Memory.created_at.desc())
 
     # Use fastapi-pagination's paginate function
     return sqlalchemy_paginate(
@@ -658,7 +680,7 @@ async def get_related_memories(
         return Page.create([], total=0, params=params)
     
     # Build query for related memories
-    query = db.query(Memory).distinct(Memory.id).filter(
+    query = db.query(Memory).filter(
         Memory.user_id == user.id,
         Memory.id != memory_id,
         Memory.state != MemoryState.deleted
